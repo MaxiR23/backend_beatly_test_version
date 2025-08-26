@@ -1,5 +1,5 @@
 # routes/music.py
-from fastapi import APIRouter, Query, Path
+from fastapi import APIRouter, Query, Path, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 import time
 import requests
@@ -15,7 +15,6 @@ from utils.artist_parser import (
     parse_related_artists,
 )
 from utils.album_parser import parse_album_info, parse_album_tracks
-from fastapi import Body
 
 router = APIRouter()
 
@@ -53,6 +52,7 @@ def get_audio_info(video_id: str):
     _cache[video_id] = {"info": info, "ts": now}
     return info
 
+
 def _stream_from_url(url: str) -> StreamingResponse:
     """Crea un StreamingResponse con media_type correcto."""
     r = requests.get(url, stream=True)
@@ -66,7 +66,11 @@ def _stream_from_url(url: str) -> StreamingResponse:
         headers["Content-Length"] = content_length
 
     # chunk grande para menos overhead
-    return StreamingResponse(r.iter_content(chunk_size=1024 * 64), media_type=content_type, headers=headers)
+    return StreamingResponse(
+        r.iter_content(chunk_size=1024 * 64),
+        media_type=content_type,
+        headers=headers,
+    )
 
 
 # --- AUDIO ---
@@ -76,10 +80,13 @@ def play_song(id: str = Query(..., description="YouTube video ID")):
     """Devuelve un stream de audio para un video de YouTube usando yt_dlp."""
     try:
         info = get_audio_info(id)
-        audio_url = info["url"]
+        audio_url = info.get("direct_url") or info["url"]  # ✅ usa cache si existe
         return _stream_from_url(audio_url)
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": "yt-dlp", "detail": str(e), "id": id})
+        return JSONResponse(
+            status_code=500,
+            content={"error": "yt-dlp", "detail": str(e), "id": id},
+        )
 
 
 @router.post("/prefetch")
@@ -95,12 +102,18 @@ def prefetch_songs(payload: dict = Body(...)):
     errors = 0
     for vid in ids:
         try:
-            get_audio_info(vid)
-            warmed_info += 1
+            info = get_audio_info(vid)
+            if info.get("direct_url"):  # ✅ asegura que quede lista la URL
+                warmed_info += 1
         except Exception:
             errors += 1
 
-    return {"ok": True, "total": len(ids), "warmed_info": warmed_info, "errors": errors}
+    return {
+        "ok": True,
+        "total": len(ids),
+        "warmed_info": warmed_info,
+        "errors": errors,
+    }
 
 
 # --- SEARCH ---
@@ -178,6 +191,10 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
                             )
                         elif ":" in run.get("text", ""):
                             duration = run["text"]
+
+                    # ❌ filtro: evitar "Official Music Video"
+                    if "Official" in title or "Video" in title:
+                        continue
 
                     thumbs = (
                         card.get("thumbnail", {})
