@@ -31,6 +31,7 @@ YDL_OPTS = {
     "cookiefile": cookies_path,
     "noplaylist": True,
     "cachedir": False,
+    "concurrent_fragment_downloads": 5,  # descarga fragmentos en paralelo
 }
 YDL = yt_dlp.YoutubeDL(YDL_OPTS)
 
@@ -157,6 +158,7 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
 
             runs = card["title"]["runs"]
 
+            # artista
             if "browseEndpoint" in runs[0].get("navigationEndpoint", {}):
                 browse_id = runs[0]["navigationEndpoint"]["browseEndpoint"]["browseId"]
                 subtitle = "".join(run.get("text", "") for run in card.get("subtitle", {}).get("runs", []))
@@ -175,6 +177,7 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
                     }
                 )
 
+            # canción
             elif "watchEndpoint" in runs[0].get("navigationEndpoint", {}):
                 title = runs[0]["text"]
                 video_id = runs[0]["navigationEndpoint"]["watchEndpoint"]["videoId"]
