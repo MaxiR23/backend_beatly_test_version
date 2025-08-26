@@ -23,7 +23,6 @@ router = APIRouter()
 _cache = {}
 CACHE_TTL = 30 * 60  # 30 minutos
 
-
 def get_audio_info(video_id: str):
     """Devuelve info de yt_dlp cacheada por 30 minutos (incluyendo URL)."""
     now = time.time()
@@ -38,9 +37,8 @@ def get_audio_info(video_id: str):
         "quiet": True,
         "skip_download": True,
         "cookiefile": cookies_path,
-        "noplaylist": True,     # no intentes bajar playlists enteras
-        "extract_flat": False,  # evita parsers extra
-        "cachedir": False,      # no escribas cache en disco
+        "noplaylist": True,
+        "cachedir": False,
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -292,4 +290,5 @@ def get_album_p(id: str = Path(..., description="Album browseId")):
     cached = get_cached(f"album:{id}")
     if cached:
         return cached
+
     return _album_payload(id)
