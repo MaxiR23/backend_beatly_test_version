@@ -25,7 +25,7 @@ CACHE_TTL = 30 * 60  # 30 minutos
 
 
 def get_audio_info(video_id: str):
-    """Devuelve info de yt_dlp cacheada por 30 minutos."""
+    """Devuelve info de yt_dlp cacheada por 30 minutos (incluyendo URL)."""
     now = time.time()
     cached = _cache.get(video_id)
     if cached and now - cached["ts"] < CACHE_TTL:
@@ -34,20 +34,26 @@ def get_audio_info(video_id: str):
     cookies_path = os.path.join(os.path.dirname(__file__), "..", "cookies.txt")
 
     ydl_opts = {
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
         "quiet": True,
         "skip_download": True,
         "cookiefile": cookies_path,
+        "noplaylist": True,     # no intentes bajar playlists enteras
+        "extract_flat": False,  # evita parsers extra
+        "cachedir": False,      # no escribas cache en disco
     }
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(
             f"https://www.youtube.com/watch?v={video_id}",
             download=False,
         )
 
+    # guardo también la url lista para evitar renegociar
+    info["direct_url"] = info.get("url")
+
     _cache[video_id] = {"info": info, "ts": now}
     return info
-
 
 def _stream_from_url(url: str) -> StreamingResponse:
     """Crea un StreamingResponse con media_type correcto."""
