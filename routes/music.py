@@ -30,7 +30,7 @@ YDL_OPTS = {
     "skip_download": True,
     "cookiefile": cookies_path,
     "noplaylist": True,
-    "cachedir": False,
+    "cachedir": True,
     "concurrent_fragment_downloads": 5,  # descarga fragmentos en paralelo
 }
 YDL = yt_dlp.YoutubeDL(YDL_OPTS)
@@ -298,3 +298,4 @@ def get_album_p(id: str = Path(...)):
     if cached:
         return cached
     return _album_payload(id)
+
