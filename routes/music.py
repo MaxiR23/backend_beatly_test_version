@@ -6,6 +6,7 @@ import requests
 import yt_dlp
 from innertube import InnerTube
 import os
+import asyncio
 
 from services.cache_service import get_cached, set_cached
 from utils.artist_parser import (
@@ -144,7 +145,6 @@ def _stream_from_url(url: str, range_header: str | None) -> StreamingResponse:
     )
 
 # --- AUDIO ENDPOINTS ---
-
 @router.get("/play")
 def play_song(request: Request, id: str = Query(..., description="YouTube video ID")):
     """
@@ -182,15 +182,18 @@ def prefetch_songs(payload: dict = Body(...)):
     if not ids:
         return {"ok": True, "total": 0, "warmed_info": 0, "errors": 0}
 
-    warmed_info = 0
-    errors = 0
-    for vid in ids:
+    async def warm(vid: str):
         try:
             data = get_audio_info(vid)  # ya fuerza URL válida
             if data.get("direct_url"):
                 warmed_info += 1
         except Exception:
-            errors += 1
+            return -1
+
+    results = await asyncio.gather(*(warm(vid) for vid in ids))
+
+    warmed_info = sum(1 for r in results if r == 1)
+    errors = sum(1 for r in results if r == -1)
 
     return {
         "ok": True,
@@ -200,7 +203,6 @@ def prefetch_songs(payload: dict = Body(...)):
     }
 
 # --- SEARCH ---
-
 @router.get("/search")
 def search_music(q: str = Query(..., description="Texto a buscar")):
     cached = get_cached(f"search:{q}")
@@ -211,7 +213,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
     response = yt.search(q)
 
     artists, songs = [], []
-
     tabs = (
         response.get("contents", {})
         .get("tabbedSearchResultsRenderer", {})
@@ -291,7 +292,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
     return result
 
 # --- ARTIST ---
-
 def _artist_payload(artist_id: str):
     yt = InnerTube("WEB_REMIX")
     response = yt.browse(artist_id)
@@ -339,7 +339,6 @@ def get_artist_p(id: str = Path(...)):
     return _artist_payload(id)
 
 # --- ALBUM ---
-
 def _album_payload(album_id: str):
     yt = InnerTube("WEB_REMIX")
     response = yt.browse(album_id)
