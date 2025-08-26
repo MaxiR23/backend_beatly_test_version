@@ -35,17 +35,21 @@ _SESSION.headers.update({
 
 def _ydl_for(client: str) -> yt_dlp.YoutubeDL:
     opts = {
-        "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
         "quiet": True,
         "skip_download": True,
         "noplaylist": True,
         "extractor_args": {
-            "youtube": {"player_client": [client]}
+            "youtube": {
+                "player_client": [client],
+            },
+            # 👇 CORRECTO: usar la clave con guion
+            "youtubepot-bgutilhttp": {
+                 "base_url": ["https://bgutil-ytdlp-pot-provider-latest.onrender.com"],#LOCAL http://127.0.0.1:4416
+            }, 
         },
     }
-    # Solo web usa cookies
-    if client == "web":
-        opts["cookiefile"] = cookies_path
+    opts["cookiefile"] = cookies_path
     return yt_dlp.YoutubeDL(opts)
 
 def _extract_best_url(video_id: str):
@@ -53,7 +57,7 @@ def _extract_best_url(video_id: str):
     Intenta con clientes que suelen traer URL directa.
     Orden por desempeño/estabilidad: ANDROID -> IOS -> WEB
     """
-    for client in ("android", "ios", "web"):
+    for client in ("mweb", "web"):
         try:
             ydl = _ydl_for(client)
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
