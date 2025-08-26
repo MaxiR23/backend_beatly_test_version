@@ -6,6 +6,7 @@ import requests
 import yt_dlp
 from innertube import InnerTube
 import os
+import asyncio
 
 from services.cache_service import get_cached, set_cached
 from utils.artist_parser import (
@@ -31,13 +32,11 @@ YDL_OPTS = {
     "cookiefile": cookies_path,
     "noplaylist": True,
     "cachedir": True,
-    "concurrent_fragment_downloads": 5,  # descarga fragmentos en paralelo
+    "concurrent_fragment_downloads": 5,
 }
 YDL = yt_dlp.YoutubeDL(YDL_OPTS)
 
-
 # --- AUDIO INFO ---
-
 def get_audio_info(video_id: str):
     """Devuelve info de yt_dlp cacheada (metadata + direct_url)."""
     now = time.time()
@@ -64,7 +63,6 @@ def get_audio_info(video_id: str):
     _cache[video_id] = data
     return data
 
-
 def _stream_from_url(url: str) -> StreamingResponse:
     """Crea un StreamingResponse con media_type correcto."""
     r = requests.get(url, stream=True)
@@ -82,9 +80,7 @@ def _stream_from_url(url: str) -> StreamingResponse:
         headers=headers,
     )
 
-
 # --- AUDIO ENDPOINTS ---
-
 @router.get("/play")
 def play_song(id: str = Query(..., description="YouTube video ID")):
     """Devuelve un stream de audio para un video de YouTube."""
@@ -98,25 +94,26 @@ def play_song(id: str = Query(..., description="YouTube video ID")):
             content={"error": "yt-dlp", "detail": str(e), "id": id},
         )
 
-
 @router.post("/prefetch")
-def prefetch_songs(payload: dict = Body(...)):
-    """Precarga info + direct_url de varias canciones."""
+async def prefetch_songs(payload: dict = Body(...)):
+    """Precarga info + direct_url de varias canciones en paralelo."""
     raw_ids = payload.get("ids", [])
     ids = list(dict.fromkeys([str(i).strip() for i in raw_ids if i]))[:50]
 
     if not ids:
         return {"ok": True, "total": 0, "warmed_info": 0, "errors": 0}
 
-    warmed_info = 0
-    errors = 0
-    for vid in ids:
+    async def warm(vid: str):
         try:
-            data = get_audio_info(vid)
-            if data.get("direct_url"):
-                warmed_info += 1
+            data = await asyncio.to_thread(get_audio_info, vid)
+            return 1 if data.get("direct_url") else 0
         except Exception:
-            errors += 1
+            return -1
+
+    results = await asyncio.gather(*(warm(vid) for vid in ids))
+
+    warmed_info = sum(1 for r in results if r == 1)
+    errors = sum(1 for r in results if r == -1)
 
     return {
         "ok": True,
@@ -125,9 +122,7 @@ def prefetch_songs(payload: dict = Body(...)):
         "errors": errors,
     }
 
-
 # --- SEARCH ---
-
 @router.get("/search")
 def search_music(q: str = Query(..., description="Texto a buscar")):
     cached = get_cached(f"search:{q}")
@@ -138,7 +133,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
     response = yt.search(q)
 
     artists, songs = [], []
-
     tabs = (
         response.get("contents", {})
         .get("tabbedSearchResultsRenderer", {})
@@ -158,7 +152,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
 
             runs = card["title"]["runs"]
 
-            # artista
             if "browseEndpoint" in runs[0].get("navigationEndpoint", {}):
                 browse_id = runs[0]["navigationEndpoint"]["browseEndpoint"]["browseId"]
                 subtitle = "".join(run.get("text", "") for run in card.get("subtitle", {}).get("runs", []))
@@ -177,7 +170,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
                     }
                 )
 
-            # canción
             elif "watchEndpoint" in runs[0].get("navigationEndpoint", {}):
                 title = runs[0]["text"]
                 video_id = runs[0]["navigationEndpoint"]["watchEndpoint"]["videoId"]
@@ -218,9 +210,7 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
     set_cached(f"search:{q}", result)
     return result
 
-
 # --- ARTIST ---
-
 def _artist_payload(artist_id: str):
     yt = InnerTube("WEB_REMIX")
     response = yt.browse(artist_id)
@@ -259,19 +249,15 @@ def _artist_payload(artist_id: str):
         "related": parse_related_artists(contents[7]) if len(contents) > 7 else [],
     }
 
-
 @router.get("/artist")
 def get_artist_q(id: str = Query(...)):
     return _artist_payload(id)
-
 
 @router.get("/artist/{id}")
 def get_artist_p(id: str = Path(...)):
     return _artist_payload(id)
 
-
 # --- ALBUM ---
-
 def _album_payload(album_id: str):
     yt = InnerTube("WEB_REMIX")
     response = yt.browse(album_id)
@@ -283,7 +269,6 @@ def _album_payload(album_id: str):
     set_cached(f"album:{album_id}", payload, 30 * 60)
     return payload
 
-
 @router.get("/album")
 def get_album_q(id: str = Query(...)):
     cached = get_cached(f"album:{id}")
@@ -291,11 +276,9 @@ def get_album_q(id: str = Query(...)):
         return cached
     return _album_payload(id)
 
-
 @router.get("/album/{id}")
 def get_album_p(id: str = Path(...)):
     cached = get_cached(f"album:{id}")
     if cached:
         return cached
     return _album_payload(id)
-
