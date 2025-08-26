@@ -1,6 +1,6 @@
 # routes/music.py
 from fastapi import APIRouter, Query, Path, Body, Request
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import time
 import requests
 import yt_dlp
@@ -148,23 +148,26 @@ def _stream_from_url(url: str, range_header: str | None) -> StreamingResponse:
     )
 
 # --- AUDIO ENDPOINTS ---
+
 @router.get("/play")
-def play_song(id: str = Query(..., description="YouTube video ID")):
+def play_song(request: Request, id: str = Query(..., description="YouTube video ID")):
     """
-    Devuelve redirect 302 a la URL directa de YouTube.
+    Devuelve stream de audio con soporte Range y refresh de URL si expiró.
     """
     try:
         data = get_audio_info(id)
-        audio_url = data["direct_url"]
+        audio_url = data["direct_url"]  # garantizado por get_audio_info
 
-        # Si la URL está caída (403/404), refrescamos una vez
-        if not _probe_url(audio_url, None):
-            data = get_audio_info(id)
+        # Si la URL cayó (403/404/expired), refrescamos una vez
+        range_hdr = request.headers.get("Range")
+        if not _probe_url(audio_url, range_hdr):
+            data = get_audio_info(id)  # re-extrae y actualiza cache
             audio_url = data["direct_url"]
 
+        # Log mínimo para diagnosticar cliente usado
         print(f"[play] id={id} via client={data.get('client')} ttl={URL_TTL}s")
 
-        return RedirectResponse(audio_url)
+        return _stream_from_url(audio_url, range_hdr)
     except Exception as e:
         return JSONResponse(
             status_code=502,
