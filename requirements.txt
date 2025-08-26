@@ -9,6 +9,4 @@ aiohttp==3.12.12
 websockets==12.0
 yt-dlp==2025.8.22
 httpx==0.25.2
-
-#instalar innertube desde GitHub sin deps
-git+https://github.com/hexalion11/youtubei.py.git#egg=innertube
+innertube==2.1.19
