@@ -1,7 +1,8 @@
 # routes/music.py
 from fastapi import APIRouter, Query, Path, Body
-from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import time
+import requests
 import yt_dlp
 from innertube import InnerTube
 import os
@@ -43,7 +44,6 @@ def get_audio_info(video_id: str):
 
     if cached:
         age = now - cached["ts"]
-        # direct_url expira más rápido que metadata
         if age < URL_TTL and cached.get("direct_url"):
             return cached
         elif age < CACHE_TTL and cached.get("info"):
@@ -64,21 +64,33 @@ def get_audio_info(video_id: str):
     return data
 
 
+def _stream_from_url(url: str) -> StreamingResponse:
+    """Crea un StreamingResponse con media_type correcto."""
+    r = requests.get(url, stream=True)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+    }
+    content_type = r.headers.get("Content-Type", "audio/webm")
+    content_length = r.headers.get("Content-Length")
+    if content_length:
+        headers["Content-Length"] = content_length
+    return StreamingResponse(
+        r.iter_content(chunk_size=1024 * 64),
+        media_type=content_type,
+        headers=headers,
+    )
+
+
 # --- AUDIO ENDPOINTS ---
 
 @router.get("/play")
 def play_song(id: str = Query(..., description="YouTube video ID")):
-    """Devuelve un stream de audio (redirect directo a YT si hay cache)."""
+    """Devuelve un stream de audio para un video de YouTube."""
     try:
         data = get_audio_info(id)
         audio_url = data.get("direct_url") or data["info"]["url"]
-
-        # 🚀 redirect directo → instantáneo
-        return RedirectResponse(audio_url)
-
-        # ❗ si querés seguir proxyeando con StreamingResponse:
-        # return _stream_from_url(audio_url)
-
+        return _stream_from_url(audio_url)
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -145,7 +157,6 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
 
             runs = card["title"]["runs"]
 
-            # --- artista ---
             if "browseEndpoint" in runs[0].get("navigationEndpoint", {}):
                 browse_id = runs[0]["navigationEndpoint"]["browseEndpoint"]["browseId"]
                 subtitle = "".join(run.get("text", "") for run in card.get("subtitle", {}).get("runs", []))
@@ -164,12 +175,10 @@ def search_music(q: str = Query(..., description="Texto a buscar")):
                     }
                 )
 
-            # --- canción ---
             elif "watchEndpoint" in runs[0].get("navigationEndpoint", {}):
                 title = runs[0]["text"]
                 video_id = runs[0]["navigationEndpoint"]["watchEndpoint"]["videoId"]
 
-                # ❌ filtrar videos oficiales
                 if "Official" in title or "Video" in title:
                     continue
 
