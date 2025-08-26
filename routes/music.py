@@ -5,6 +5,7 @@ import time
 import requests
 import yt_dlp
 from innertube import InnerTube
+import os
 
 from services.cache_service import get_cached, set_cached
 from utils.artist_parser import (
@@ -30,10 +31,13 @@ def get_audio_info(video_id: str):
     if cached and now - cached["ts"] < CACHE_TTL:
         return cached["info"]
 
+    cookies_path = os.path.join(os.path.dirname(__file__), "..", "cookies.txt")
+
     ydl_opts = {
         "format": "bestaudio/best",
         "quiet": True,
         "skip_download": True,
+        "cookiefile": cookies_path,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(
