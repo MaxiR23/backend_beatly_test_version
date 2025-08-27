@@ -1,11 +1,12 @@
 # routes/music.py
 from fastapi import APIRouter, Query, Path, Body, Request
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 import time
 import requests
 import yt_dlp
 from innertube import InnerTube
 import os
+import urllib.parse  # <- NUEVO
 
 from services.cache_service import get_cached, set_cached
 from utils.artist_parser import (
@@ -20,7 +21,7 @@ router = APIRouter()
 
 # --- CONFIG ---
 CACHE_TTL = 30 * 60    # metadata: 30 min
-URL_TTL   = 120        # URL directa: 2 min (corto para evitar expiradas)
+URL_TTL   = 15 * 60    # fallback si no podemos leer expire (antes 120s era muy corto)
 _cache = {}
 
 cookies_path = os.path.join(os.path.dirname(__file__), "..", "cookies.txt")
@@ -34,7 +35,11 @@ _SESSION.headers.update({
 })
 
 def _ydl_for(client: str) -> yt_dlp.YoutubeDL:
+    # Clientes "mobile" NO soportan cookies en yt-dlp
+    mobile_client = client.lower() in ("android", "ios")
+
     opts = {
+        # Preferí bestaudio y dejá m4a como preferencia, no como requisito duro
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "quiet": True,
         "skip_download": True,
@@ -43,21 +48,45 @@ def _ydl_for(client: str) -> yt_dlp.YoutubeDL:
             "youtube": {
                 "player_client": [client],
             },
-            # 👇 CORRECTO: usar la clave con guion
+            # Si usás este provider, dejalo; si android/ios ya resuelve bien, podés quitarlo
             "youtubepot-bgutilhttp": {
-                 "base_url": ["https://bgutil-ytdlp-pot-provider-latest.onrender.com"],#LOCAL http://127.0.0.1:4416
-            }, 
+                "base_url": ["https://bgutil-ytdlp-pot-provider-latest.onrender.com"],  # LOCAL http://127.0.0.1:4416
+            },
         },
+        # Opcional: menos retries si querés respuestas más rápidas ante SABR
+        "retries": 1,
+        "extractor_retries": 1,
     }
-    opts["cookiefile"] = cookies_path
+
+    # 👇 Sólo pasamos cookies para web/mweb (NO para android/ios)
+    if not mobile_client and os.path.exists(cookies_path):
+        opts["cookiefile"] = cookies_path
+
     return yt_dlp.YoutubeDL(opts)
+
+def _ttl_from_url(u: str) -> int:
+    """Deriva TTL real de la URL googlevideo leyendo 'expire' o 'x-goog-expires'."""
+    try:
+        qs = urllib.parse.parse_qs(urllib.parse.urlsplit(u).query)
+        now = int(time.time())
+        exp = 0
+        if "expire" in qs:
+            exp = int(qs["expire"][0])
+            ttl = max(60, min(90*60, exp - now - 120))  # margen de 120s
+            return ttl
+        if "x-goog-expires" in qs:
+            ttl = int(qs["x-goog-expires"][0])
+            return max(60, min(90*60, ttl - 120))
+    except Exception:
+        pass
+    return URL_TTL
 
 def _extract_best_url(video_id: str):
     """
-    Intenta con clientes que suelen traer URL directa.
+    Intenta con clientes que suelen traer URL directa rápido.
     Orden por desempeño/estabilidad: ANDROID -> IOS -> WEB
     """
-    for client in ("mweb", "web"):
+    for client in ("web_music", "mweb", "web"):
         try:
             ydl = _ydl_for(client)
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
@@ -65,43 +94,40 @@ def _extract_best_url(video_id: str):
             if direct_url and direct_url.startswith("http"):
                 return info, direct_url, client
         except Exception:
-            # probamos siguiente cliente
             continue
     raise RuntimeError("no_audio_format")
 
 def get_audio_info(video_id: str):
     """
-    Devuelve info cacheada; si la URL no está o venció, re-extrae
-    con clientes no-WEB para evitar SABR (sin URL).
+    Devuelve info cacheada; si la URL no está o venció, re-extrae.
+    Usa TTL derivado de la URL para evitar re-extracciones innecesarias.
     """
     now = time.time()
     cached = _cache.get(video_id)
 
-    # 1) Si hay URL fresca, usala
-    if cached and cached.get("direct_url") and (now - cached["ts"] < URL_TTL):
-        return cached
+    if cached and cached.get("direct_url"):
+        ttl = cached.get("ttl", URL_TTL)
+        if now - cached["ts"] < ttl:
+            return cached
 
-    # 2) Re-extraer siempre que no tengamos URL válida fresca
     info, direct_url, client = _extract_best_url(video_id)
     data = {
         "info": info,
         "direct_url": direct_url,
         "client": client,
         "ts": now,
+        "ttl": _ttl_from_url(direct_url),
     }
     _cache[video_id] = data
     return data
 
-def _probe_url(url: str, range_header: str | None) -> bool:
+def _probe_url(url: str) -> bool:
     """
-    Sonda rápida: verifica si la URL sigue viva (200/206).
-    Usa GET stream con timeout corto y cierra enseguida.
+    Sonda rápida: pide el primer byte (Range 0-1) para validar 200/206.
     """
-    headers = {}
-    if range_header:
-        headers["Range"] = range_header
+    headers = {"Range": "bytes=0-1"}
     try:
-        r = _SESSION.get(url, headers=headers, stream=True, timeout=(4, 8), allow_redirects=True)
+        r = _SESSION.get(url, headers=headers, stream=True, timeout=(2, 5), allow_redirects=True)
         ok = r.status_code in (200, 206)
         r.close()
         return ok
@@ -125,12 +151,8 @@ def _stream_from_url(url: str, range_header: str | None) -> StreamingResponse:
         "Connection": "keep-alive",
     }
 
-    # Propagamos cabeceras útiles desde upstream
     ct = r.headers.get("Content-Type")
-    if ct:
-        media_type = ct
-    else:
-        media_type = "audio/webm"
+    media_type = ct if ct else "audio/webm"
 
     cl = r.headers.get("Content-Length")
     if cl:
@@ -144,29 +166,37 @@ def _stream_from_url(url: str, range_header: str | None) -> StreamingResponse:
         r.iter_content(chunk_size=1024 * 256),
         media_type=media_type,
         headers=resp_headers,
-        status_code=r.status_code,  # respeta 206 si upstream respondió parcial
+        status_code=r.status_code,
     )
 
 # --- AUDIO ENDPOINTS ---
 
 @router.get("/play")
-def play_song(request: Request, id: str = Query(..., description="YouTube video ID")):
+def play_song(
+    request: Request,
+    id: str = Query(..., description="YouTube video ID"),
+    redir: int = Query(0, description="Si 1, redirige al CDN en vez de proxyear")
+):
     """
     Devuelve stream de audio con soporte Range y refresh de URL si expiró.
+    Si redir=1, devuelve 307 Redirect al CDN (menos latencia).
     """
     try:
         data = get_audio_info(id)
-        audio_url = data["direct_url"]  # garantizado por get_audio_info
+        audio_url = data["direct_url"]
 
         # Si la URL cayó (403/404/expired), refrescamos una vez
-        range_hdr = request.headers.get("Range")
-        if not _probe_url(audio_url, range_hdr):
+        if not _probe_url(audio_url):
             data = get_audio_info(id)  # re-extrae y actualiza cache
             audio_url = data["direct_url"]
 
-        # Log mínimo para diagnosticar cliente usado
-        print(f"[play] id={id} via client={data.get('client')} ttl={URL_TTL}s")
+        approx_ttl = data.get("ttl", URL_TTL)
+        print(f"[play] id={id} via client={data.get('client')} ttl≈{approx_ttl}s")
 
+        if redir == 1:
+            return RedirectResponse(url=audio_url, status_code=307)
+
+        range_hdr = request.headers.get("Range")
         return _stream_from_url(audio_url, range_hdr)
     except Exception as e:
         return JSONResponse(
@@ -190,7 +220,7 @@ def prefetch_songs(payload: dict = Body(...)):
     errors = 0
     for vid in ids:
         try:
-            data = get_audio_info(vid)  # ya fuerza URL válida
+            data = get_audio_info(vid)
             if data.get("direct_url"):
                 warmed_info += 1
         except Exception:
